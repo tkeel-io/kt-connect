@@ -3,7 +3,7 @@ package general
 import (
 	"encoding/json"
 	"fmt"
-	opt "github.com/alibaba/kt-connect/pkg/kt/options"
+	opt "github.com/alibaba/kt-connect/pkg/kt/command/options"
 	"github.com/alibaba/kt-connect/pkg/kt/service/cluster"
 	"github.com/alibaba/kt-connect/pkg/kt/transmission"
 	"github.com/alibaba/kt-connect/pkg/kt/util"
@@ -11,14 +11,15 @@ import (
 	appV1 "k8s.io/api/apps/v1"
 	coreV1 "k8s.io/api/core/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"strings"
 	"time"
 )
 
-func CreateShadowAndInbound(shadowPodName, portsToExpose string, labels, annotations map[string]string) error {
+func CreateShadowAndInbound(shadowPodName, portsToExpose string, labels, annotations map[string]string, portNameDict map[int]string) error {
 
 	envs := make(map[string]string)
-	_, podName, privateKeyPath, err := cluster.Ins().GetOrCreateShadow(shadowPodName, labels, annotations, envs, portsToExpose)
+	_, podName, privateKeyPath, err := cluster.Ins().GetOrCreateShadow(shadowPodName, labels, annotations, envs, portsToExpose, portNameDict)
 	if err != nil {
 		return err
 	}
@@ -140,6 +141,15 @@ func UpdateServiceSelector(svcName, namespace string, selector map[string]string
 	}
 
 	go cluster.Ins().WatchService(svcName, namespace, nil, nil, func(newSvc *coreV1.Service) {
+		if pods, err2 := cluster.Ins().GetPodsByLabel(selector, namespace); err2 != nil || len(pods.Items) == 0 {
+			log.Warn().Msgf("Router pod has gone")
+			return
+		} else if pods.Items[0].DeletionTimestamp != nil {
+			log.Warn().Msgf("Router pod is terminating")
+			return
+		} else if len(pods.Items) > 1 {
+			log.Warn().Msgf("More than one router pod selected")
+		}
 		if !isServiceChanged(newSvc, selector, marshaledSelector) {
 			return
 		}
@@ -161,12 +171,39 @@ func UpdateServiceSelector(svcName, namespace string, selector map[string]string
 	return nil
 }
 
+func GetTargetPorts(svc *coreV1.Service) map[int]string {
+	var pod *coreV1.Pod = nil
+	svcPorts := svc.Spec.Ports
+	targetPorts := map[int]string{}
+	for _, p := range svcPorts {
+		if p.TargetPort.Type == intstr.Int {
+			targetPorts[p.TargetPort.IntValue()] = fmt.Sprintf("kt-%d", p.TargetPort.IntValue())
+		} else {
+			if pod == nil {
+				pods, err := cluster.Ins().GetPodsByLabel(svc.Spec.Selector, opt.Get().Namespace)
+				if err != nil || len(pods.Items) == 0 {
+					return map[int]string{}
+				}
+				pod = &pods.Items[0]
+			}
+			for _, c := range pod.Spec.Containers {
+				for _, cp := range c.Ports {
+					if cp.Name == p.TargetPort.String() {
+						targetPorts[int(cp.ContainerPort)] = cp.Name
+						continue
+					}
+				}
+			}
+		}
+	}
+	return targetPorts
+}
+
 func isServiceChanged(svc *coreV1.Service, selector map[string]string, marshaledSelector string) bool {
 	return !util.MapEquals(svc.Spec.Selector, selector) || svc.Annotations == nil || svc.Annotations[util.KtSelector] != marshaledSelector
 }
 
-func getServiceByDeployment(app *appV1.Deployment,
-	namespace string) (*coreV1.Service, error) {
+func getServiceByDeployment(app *appV1.Deployment, namespace string) (*coreV1.Service, error) {
 	svcList, err := cluster.Ins().GetServicesBySelector(app.Spec.Selector.MatchLabels, namespace)
 	if err != nil {
 		return nil, err

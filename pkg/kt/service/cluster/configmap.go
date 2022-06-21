@@ -31,18 +31,25 @@ func (k *Kubernetes) RemoveConfigMap(name, namespace string) (err error) {
 }
 
 func (k *Kubernetes) UpdateConfigMapHeartBeat(name, namespace string) {
-	log.Debug().Msgf("Heartbeat configmap %s ticked at %s", name, formattedTime())
 	if _, err := k.Clientset.CoreV1().ConfigMaps(namespace).
 		Patch(context.TODO(), name, types.JSONPatchType, []byte(resourceHeartbeatPatch()), metav1.PatchOptions{}); err != nil {
-		log.Warn().Err(err).Msgf("Failed to update config map heart beat")
+		if healthy, exists := LastHeartBeatStatus["configmap_" + name]; healthy || !exists {
+			log.Warn().Err(err).Msgf("Failed to update heart beat of config map %s", name)
+		} else {
+			log.Debug().Err(err).Msgf("Config map %s heart beat interrupted", name)
+		}
+		LastHeartBeatStatus["configmap_" + name] = false
+	} else {
+		log.Debug().Msgf("Heartbeat configmap %s ticked at %s", name, util.FormattedTime())
+		LastHeartBeatStatus["configmap_" + name] = true
 	}
 }
 
 func (k *Kubernetes) createConfigMapWithSshKey(labels map[string]string, sshcm string, namespace string,
 	generator *util.SSHGenerator) (configMap *coreV1.ConfigMap, err error) {
-
 	SetupHeartBeat(sshcm, namespace, k.UpdateConfigMapHeartBeat)
 
+	labels = util.MergeMap(labels, map[string]string{util.ControlBy: util.KubernetesToolkit})
 	return k.Clientset.CoreV1().ConfigMaps(namespace).Create(context.TODO(), &coreV1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sshcm,

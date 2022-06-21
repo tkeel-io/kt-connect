@@ -4,123 +4,63 @@ import (
 	"fmt"
 	"github.com/alibaba/kt-connect/pkg/kt/command/clean"
 	"github.com/alibaba/kt-connect/pkg/kt/command/general"
-	opt "github.com/alibaba/kt-connect/pkg/kt/options"
+	opt "github.com/alibaba/kt-connect/pkg/kt/command/options"
 	"github.com/alibaba/kt-connect/pkg/kt/service/cluster"
-	"github.com/alibaba/kt-connect/pkg/kt/service/dns"
-	"github.com/alibaba/kt-connect/pkg/kt/util"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	urfave "github.com/urfave/cli"
-	"io/ioutil"
-	"os"
-	"strconv"
-	"strings"
+	"github.com/spf13/cobra"
 )
 
 // NewCleanCommand return new connect command
-func NewCleanCommand(action ActionInterface) urfave.Command {
-	return urfave.Command{
-		Name:  "clean",
-		Usage: "delete unavailing resources created by kt from kubernetes cluster",
-		UsageText: "ktctl clean [command options]",
-		Flags: general.CleanActionFlag(opt.Get()),
-		Action: func(c *urfave.Context) error {
-			if opt.Get().Debug {
-				zerolog.SetGlobalLevel(zerolog.DebugLevel)
-			}
-			if err := general.CombineKubeOpts(); err != nil {
-				return err
-			}
+func NewCleanCommand(action ActionInterface) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:  "clean",
+		Short: "Delete unavailing resources created by kt from kubernetes cluster",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return general.Prepare()
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			return action.Clean()
 		},
 	}
+
+	cmd.SetUsageTemplate(fmt.Sprintf(general.UsageTemplate, "ktctl clean [command options]"))
+	cmd.Long = cmd.Short
+
+	cmd.Flags().SortFlags = false
+	cmd.InheritedFlags().SortFlags = false
+	cmd.Flags().Int64Var(&opt.Get().CleanOptions.ThresholdInMinus, "thresholdInMinus", cluster.ResourceHeartBeatIntervalMinus * 2 + 1, "Length of allowed disconnection time before a unavailing shadow pod be deleted")
+	cmd.Flags().BoolVar(&opt.Get().CleanOptions.DryRun, "dryRun", false, "Only print name of deployments to be deleted")
+	cmd.Flags().BoolVar(&opt.Get().CleanOptions.SweepLocalRoute, "sweepLocalRoute", false, "Also clean up local route table record created by kt")
+	return cmd
 }
 
 // Clean delete unavailing shadow pods
 func (action *Action) Clean() error {
-	cleanPidFiles()
-	pods, cfs, apps, svcs, err := cluster.Ins().GetKtResources(opt.Get().Namespace)
-	if err != nil {
-		return err
-	}
-	log.Debug().Msgf("Find %d kt pods", len(pods))
-	resourceToClean := clean.ResourceToClean{
-		PodsToDelete: make([]string, 0),
-		ServicesToDelete: make([]string, 0),
-		ConfigMapsToDelete: make([]string, 0),
-		DeploymentsToDelete: make([]string, 0),
-		DeploymentsToScale: make(map[string]int32),
-		ServicesToRecover: make([]string, 0),
-		ServicesToUnlock: make([]string, 0),
-	}
-	for _, pod := range pods {
-		clean.AnalysisExpiredPods(pod, opt.Get().CleanOptions.ThresholdInMinus, &resourceToClean)
-	}
-	for _, cf := range cfs {
-		clean.AnalysisExpiredConfigmaps(cf, opt.Get().CleanOptions.ThresholdInMinus, &resourceToClean)
-	}
-	for _, app := range apps {
-		clean.AnalysisExpiredDeployments(app, opt.Get().CleanOptions.ThresholdInMinus, &resourceToClean)
-	}
-	for _, svc := range svcs {
-		clean.AnalysisExpiredServices(svc, opt.Get().CleanOptions.ThresholdInMinus, &resourceToClean)
-	}
-	svcList, err := cluster.Ins().GetAllServiceInNamespace(opt.Get().Namespace)
-	clean.AnalysisLockAndOrphanServices(svcList.Items, &resourceToClean)
-	if clean.IsEmpty(resourceToClean) {
-		log.Info().Msg("No unavailing kt resource found (^.^)YYa!!")
+	if resourceToClean, err := clean.CheckClusterResources(); err != nil {
+		log.Warn().Err(err).Msgf("Failed to clean up cluster resources")
 	} else {
-		if opt.Get().CleanOptions.DryRun {
-			clean.PrintResourceToClean(resourceToClean)
+		if isEmpty(resourceToClean) {
+			log.Info().Msg("No unavailing kt resource found (^.^)YYa!!")
 		} else {
-			clean.TidyResource(resourceToClean, opt.Get().Namespace)
-		}
-	}
-
-	if !opt.Get().CleanOptions.DryRun {
-		log.Debug().Msg("Cleaning up unused local rsa keys ...")
-		util.CleanRsaKeys()
-		if util.GetDaemonRunning(util.ComponentConnect) < 0 {
-			if util.IsRunAsAdmin() {
-				log.Debug().Msg("Cleaning up hosts file ...")
-				dns.DropHosts()
-				log.Debug().Msg("Cleaning DNS configuration ...")
-				dns.Ins().RestoreNameServer()
+			if opt.Get().CleanOptions.DryRun {
+				clean.PrintClusterResourcesToClean(resourceToClean)
 			} else {
-				log.Info().Msgf("Not %s user, DNS cleanup skipped", util.GetAdminUserName())
+				clean.TidyClusterResources(resourceToClean)
 			}
 		}
+	}
+	if !opt.Get().CleanOptions.DryRun {
+		clean.TidyLocalResources()
 	}
 	return nil
 }
 
-func cleanPidFiles() {
-	files, _ := ioutil.ReadDir(util.KtHome)
-	for _, f := range files {
-		if strings.HasSuffix(f.Name(), ".pid") {
-			component, pid := parseComponentAndPid(f.Name())
-			if util.IsProcessExist(pid) {
-				log.Debug().Msgf("Find kt %s instance with pid %d", component, pid)
-			} else {
-				log.Info().Msgf("Removing remnant pid file %s", f.Name())
-				if err := os.Remove(fmt.Sprintf("%s/%s", util.KtHome, f.Name())); err != nil {
-					log.Error().Err(err).Msgf("Delete pid file %s failed", f.Name())
-				}
-			}
-		}
-	}
-}
-
-func parseComponentAndPid(pidFileName string) (string, int) {
-	startPos := strings.LastIndex(pidFileName, "-")
-	endPos := strings.Index(pidFileName, ".")
-	if startPos > 0 && endPos > startPos {
-		component := pidFileName[0 : startPos]
-		pid, err := strconv.Atoi(pidFileName[startPos+1 : endPos])
-		if err != nil {
-			return "", -1
-		}
-		return component, pid
-	}
-	return "", -1
+func isEmpty(r *clean.ResourceToClean) bool {
+	return len(r.PodsToDelete) == 0 &&
+		len(r.ConfigMapsToDelete) == 0 &&
+		len(r.DeploymentsToDelete) == 0 &&
+		len(r.DeploymentsToScale) == 0 &&
+		len(r.ServicesToDelete) == 0 &&
+		len(r.ServicesToUnlock) == 0 &&
+		len(r.ServicesToRecover) == 0
 }

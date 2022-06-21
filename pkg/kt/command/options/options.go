@@ -9,31 +9,32 @@ import (
 
 // ConnectOptions ...
 type ConnectOptions struct {
-	Global               bool
-	DisablePodIp         bool
-	DisableTunDevice     bool
-	DisableTunRoute      bool
-	SocksPort            int
-	DnsCacheTtl          int64
-	IncludeIps           string
-	ExcludeIps           string
-	Mode                 string
-	DnsMode              string
-	SharedShadow         bool
-	ClusterDomain        string
+	Global           bool
+	DisablePodIp     bool
+	DisableTunDevice bool
+	DisableTunRoute  bool
+	SocksPort        int
+	DnsCacheTtl      int64
+	IncludeIps       string
+	ExcludeIps       string
+	Mode             string
+	DnsMode          string
+	SharedShadow     bool
+	ClusterDomain    string
+	SkipCleanup      bool
 }
 
 // ExchangeOptions ...
 type ExchangeOptions struct {
-	Mode   string
-	Expose string
+	Mode            string
+	Expose          string
 	RecoverWaitTime int
 }
 
 // MeshOptions ...
 type MeshOptions struct {
-	Mode   string
-	Expose string
+	Mode        string
+	Expose      string
 	VersionMark string
 	RouterImage string
 }
@@ -48,6 +49,7 @@ type PreviewOptions struct {
 type CleanOptions struct {
 	DryRun           bool
 	ThresholdInMinus int64
+	SweepLocalRoute  bool
 }
 
 // RuntimeOptions ...
@@ -67,7 +69,7 @@ type RuntimeOptions struct {
 	Router string
 	// Mesh version of mesh pod
 	Mesh string
-	// Origin the origin app name
+	// Origin the origin deployment or service name
 	Origin string
 	// Replicas the origin replicas
 	Replicas int32
@@ -79,12 +81,13 @@ type RuntimeOptions struct {
 
 // DaemonOptions cli options
 type DaemonOptions struct {
-	RuntimeStore   *RuntimeOptions
-	PreviewOptions *PreviewOptions
+	RuntimeStore        *RuntimeOptions
+	PreviewOptions      *PreviewOptions
 	ConnectOptions      *ConnectOptions
 	ExchangeOptions     *ExchangeOptions
 	MeshOptions         *MeshOptions
 	CleanOptions        *CleanOptions
+	RunAsWorkerProcess  bool
 	KubeConfig          string
 	Namespace           string
 	ServiceAccount      string
@@ -98,7 +101,9 @@ type DaemonOptions struct {
 	PodCreationWaitTime int
 	UseShadowDeployment bool
 	AlwaysUpdateShadow  bool
+	SkipTimeDiff        bool
 	KubeContext         string
+	PodQuota            string
 }
 
 var opt *DaemonOptions

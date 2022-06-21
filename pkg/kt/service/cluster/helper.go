@@ -2,7 +2,8 @@ package cluster
 
 import (
 	"fmt"
-	opt "github.com/alibaba/kt-connect/pkg/kt/options"
+
+	opt "github.com/alibaba/kt-connect/pkg/kt/command/options"
 	"github.com/alibaba/kt-connect/pkg/kt/util"
 	appV1 "k8s.io/api/apps/v1"
 	coreV1 "k8s.io/api/core/v1"
@@ -24,7 +25,7 @@ func getKubernetesClient(kubeConfig string) (clientset *kubernetes.Clientset, er
 func createService(metaAndSpec *SvcMetaAndSpec) *coreV1.Service {
 	var servicePorts []coreV1.ServicePort
 	metaAndSpec.Meta.Annotations = util.MapPut(metaAndSpec.Meta.Annotations, util.KtLastHeartBeat, util.GetTimestamp())
-	metaAndSpec.Meta.Labels = util.MapPut(metaAndSpec.Meta.Labels, util.ControlBy, util.KubernetesToolkit)
+	metaAndSpec.Meta.Labels = util.MergeMap(metaAndSpec.Meta.Labels, map[string]string{util.ControlBy: util.KubernetesToolkit})
 
 	for srcPort, targetPort := range metaAndSpec.Ports {
 		servicePorts = append(servicePorts, coreV1.ServicePort{
@@ -61,7 +62,7 @@ func createDeployment(metaAndSpec *PodMetaAndSpec) *appV1.Deployment {
 	for k, v := range metaAndSpec.Meta.Labels {
 		originLabels[k] = v
 	}
-	metaAndSpec.Meta.Labels = util.MapPut(metaAndSpec.Meta.Labels, util.ControlBy, util.KubernetesToolkit)
+	metaAndSpec.Meta.Labels = util.MergeMap(metaAndSpec.Meta.Labels, map[string]string{util.ControlBy: util.KubernetesToolkit})
 
 	return &appV1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -88,7 +89,7 @@ func createDeployment(metaAndSpec *PodMetaAndSpec) *appV1.Deployment {
 func createPod(metaAndSpec *PodMetaAndSpec) *coreV1.Pod {
 	metaAndSpec.Meta.Annotations = util.MapPut(metaAndSpec.Meta.Annotations, util.KtRefCount, "1")
 	metaAndSpec.Meta.Annotations = util.MapPut(metaAndSpec.Meta.Annotations, util.KtLastHeartBeat, util.GetTimestamp())
-	metaAndSpec.Meta.Labels = util.MapPut(metaAndSpec.Meta.Labels, util.ControlBy, util.KubernetesToolkit)
+	metaAndSpec.Meta.Labels = util.MergeMap(metaAndSpec.Meta.Labels, map[string]string{util.ControlBy: util.KubernetesToolkit})
 
 	pod := &coreV1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -116,7 +117,7 @@ func createPod(metaAndSpec *PodMetaAndSpec) *coreV1.Pod {
 	return pod
 }
 
-func createContainer(image string, args []string, envs map[string]string, ports []int) coreV1.Container {
+func createContainer(image string, args []string, envs map[string]string, ports map[string]int) coreV1.Container {
 	var envVar []coreV1.EnvVar
 	for k, v := range envs {
 		envVar = append(envVar, coreV1.EnvVar{Name: k, Value: v})
@@ -141,8 +142,15 @@ func createContainer(image string, args []string, envs map[string]string, ports 
 			},
 		},
 		Ports: []coreV1.ContainerPort{},
+		Resources: coreV1.ResourceRequirements{
+			Limits:   coreV1.ResourceList{},
+			Requests: coreV1.ResourceList{},
+		},
 	}
-	for _, port := range ports {
+	if opt.Get().PodQuota != "" {
+		addResourceLimit(&container, opt.Get().PodQuota)
+	}
+	for name, port := range ports {
 		container.Ports = append(container.Ports, coreV1.ContainerPort{
 			// TODO: assume port using http protocol, should be replace with user-defined protocol, for istio constraint
 			Name:          fmt.Sprintf("http-%d", port),

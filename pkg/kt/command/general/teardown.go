@@ -3,7 +3,7 @@ package general
 import (
 	"encoding/json"
 	"fmt"
-	opt "github.com/alibaba/kt-connect/pkg/kt/options"
+	opt "github.com/alibaba/kt-connect/pkg/kt/command/options"
 	"github.com/alibaba/kt-connect/pkg/kt/service/cluster"
 	"github.com/alibaba/kt-connect/pkg/kt/service/dns"
 	"github.com/alibaba/kt-connect/pkg/kt/util"
@@ -97,31 +97,38 @@ func recoverAutoMeshRoute() {
 		routerPod, err := cluster.Ins().GetPod(opt.Get().RuntimeStore.Router, opt.Get().Namespace)
 		if err != nil {
 			log.Error().Err(err).Msgf("Router pod has been removed unexpectedly")
+			// in case of router pod gone, try recover origin service via runtime store
+			if opt.Get().RuntimeStore.Origin != "" {
+				recoverService(opt.Get().RuntimeStore.Origin)
+			}
 			return
 		}
 		if shouldDelRouter, err2 := cluster.Ins().DecreasePodRef(opt.Get().RuntimeStore.Router, opt.Get().Namespace); err2 != nil {
 			log.Error().Err(err2).Msgf("Decrease router pod %s reference failed", opt.Get().RuntimeStore.Shadow)
 		} else if shouldDelRouter {
-			recoverService(routerPod.Annotations[util.KtConfig])
+			routerConfig := routerPod.Annotations[util.KtConfig]
+			config := util.String2Map(routerConfig)
+			recoverService(config["service"])
+			if err = cluster.Ins().RemovePod(opt.Get().RuntimeStore.Router, opt.Get().Namespace); err != nil {
+				log.Warn().Err(err).Msgf("Failed to remove router pod")
+			}
 		} else {
 			stdout, stderr, err3 := cluster.Ins().ExecInPod(util.DefaultContainer, opt.Get().RuntimeStore.Router, opt.Get().Namespace,
 				util.RouterBin, "remove", opt.Get().RuntimeStore.Mesh)
 			log.Debug().Msgf("Stdout: %s", stdout)
 			log.Debug().Msgf("Stderr: %s", stderr)
 			if err3 != nil {
-				log.Error().Err(err3).Msgf("Failed to remove version %s from router pod", opt.Get().RuntimeStore.Mesh)
+				log.Warn().Err(err3).Msgf("Failed to remove version %s from router pod", opt.Get().RuntimeStore.Mesh)
 			}
 		}
 	}
 }
 
-func recoverService(routerConfig string) {
-	config := util.String2Map(routerConfig)
-	svcName := config["service"]
-	RecoverOriginalService(svcName, opt.Get().Namespace)
-	log.Info().Msgf("Original service %s recovered", svcName)
+func recoverService(originSvcName string) {
+	RecoverOriginalService(originSvcName, opt.Get().Namespace)
+	log.Info().Msgf("Original service %s recovered", originSvcName)
 
-	stuntmanSvcName := svcName + util.StuntmanServiceSuffix
+	stuntmanSvcName := originSvcName + util.StuntmanServiceSuffix
 	if err := cluster.Ins().RemoveService(stuntmanSvcName, opt.Get().Namespace); err != nil {
 		log.Error().Err(err).Msgf("Failed to remove stuntman service %s", stuntmanSvcName)
 	}
@@ -138,8 +145,8 @@ func RecoverOriginalService(svcName, namespace string) {
 			log.Warn().Msgf("No annotation found in service %s, skipping", svcName)
 			return
 		}
-		originSelector, ok := svc.Annotations[util.KtSelector]
-		if !ok {
+		originSelector, exists := svc.Annotations[util.KtSelector]
+		if !exists {
 			log.Warn().Msgf("No selector annotation found in service %s, skipping", svcName)
 			return
 		}
@@ -202,11 +209,20 @@ func cleanShadowPodAndConfigMap() {
 			}
 		}
 		if shouldDelWithShared || !opt.Get().ConnectOptions.SharedShadow {
-			for _, sshcm := range strings.Split(opt.Get().RuntimeStore.Shadow, ",") {
-				log.Info().Msgf("Cleaning configmap %s", sshcm)
-				err = cluster.Ins().RemoveConfigMap(sshcm, opt.Get().Namespace)
+			for _, shadow := range strings.Split(opt.Get().RuntimeStore.Shadow, ",") {
+				log.Info().Msgf("Cleaning configmap %s", shadow)
+				err = cluster.Ins().RemoveConfigMap(shadow, opt.Get().Namespace)
 				if err != nil {
-					log.Error().Err(err).Msgf("Delete configmap %s failed", sshcm)
+					log.Error().Err(err).Msgf("Delete configmap %s failed", shadow)
+				}
+				log.Info().Msgf("Cleaning shadow pod %s", shadow)
+				if opt.Get().UseShadowDeployment {
+					err = cluster.Ins().RemoveDeployment(shadow, opt.Get().Namespace)
+				} else {
+					err = cluster.Ins().RemovePod(shadow, opt.Get().Namespace)
+				}
+				if err != nil {
+					log.Error().Err(err).Msgf("Delete shadow pod %s failed", shadow)
 				}
 			}
 		}
@@ -216,18 +232,6 @@ func cleanShadowPodAndConfigMap() {
 				err = cluster.Ins().RemoveEphemeralContainer(util.KtExchangeContainer, shadow, opt.Get().Namespace)
 				if err != nil {
 					log.Error().Err(err).Msgf("Remove ephemeral container of pod %s failed", shadow)
-				}
-			}
-		} else if shouldDelWithShared || !opt.Get().ConnectOptions.SharedShadow {
-			for _, shadow := range strings.Split(opt.Get().RuntimeStore.Shadow, ",") {
-				log.Info().Msgf("Cleaning shadow pod %s", shadow)
-				if opt.Get().UseShadowDeployment {
-					err = cluster.Ins().RemoveDeployment(shadow, opt.Get().Namespace)
-				} else {
-					err = cluster.Ins().RemovePod(shadow, opt.Get().Namespace)
-				}
-				if err != nil {
-					log.Error().Err(err).Msgf("Delete shadow pod %s failed", shadow)
 				}
 			}
 		}
